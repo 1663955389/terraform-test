@@ -218,6 +218,7 @@ def status():
                     workspaces.append({
                         "name": workspace_dir.name,
                         "file_count": len(tf_files),
+                        "created_at": datetime.fromtimestamp(workspace_dir.stat().st_ctime).isoformat(),
                     })
                     total_files += len(tf_files)
         
@@ -285,7 +286,15 @@ def upload_terraform():
             }), 400
         
         # 确保工作空间目录存在
-        workspace_dir = _ensure_workspace_dir(workspace)
+        try:
+            workspace_dir = _ensure_workspace_dir(workspace)
+        except ValueError as e:
+            # Handle invalid workspace name errors
+            logger.error(f"Invalid workspace name: {e}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
         
         # 确保文件有 .tf 扩展名
         if not filename.endswith(".tf"):
