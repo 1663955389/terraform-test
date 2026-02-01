@@ -89,6 +89,10 @@ def _validate_filename(filename: str) -> bool:
         return False
     return bool(re.match(r'^[a-zA-Z0-9_.-]+$', filename))
 
+def _clamp_timeout(timeout: int) -> int:
+    """Clamp timeout to configured bounds (>=1 and <=MAX_TIMEOUT)"""
+    return min(max(1, int(timeout)), MAX_TIMEOUT)
+
 def _ensure_workspace_dir(workspace: str, create_if_missing: bool = True) -> Path:
     """确保工作空间目录存在或返回其路径"""
     # 验证工作空间名称（防止路径遍历攻击）
@@ -349,10 +353,7 @@ def terraform_execute():
         command = data.get("command")
         workspace = data.get("workspace", "default")
         auto_approve = data.get("auto_approve", False)
-        timeout = int(data.get("timeout", DEFAULT_TIMEOUT))
-        
-        # Clamp timeout to maximum
-        timeout = min(timeout, MAX_TIMEOUT)
+        timeout = _clamp_timeout(data.get("timeout", DEFAULT_TIMEOUT))
         
         # 验证输入
         valid_commands = {
@@ -374,7 +375,14 @@ def terraform_execute():
             }), 403
         
         # 确保工作空间目录存在
-        workspace_dir = _ensure_workspace_dir(workspace)
+        try:
+            workspace_dir = _ensure_workspace_dir(workspace)
+        except ValueError as e:
+            logger.error(f"Workspace validation failed: {e}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
         
         # 构建命令
         terraform_cmd = _build_terraform_command(command, auto_approve)
@@ -592,7 +600,14 @@ def list_files(workspace: str):
     列出工作空间中的所有 Terraform 文件
     """
     try:
-        workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
+        try:
+            workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
+        except ValueError as e:
+            logger.error(f"Workspace validation failed: {e}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
         
         files = []
         if workspace_dir.exists():
@@ -633,7 +648,14 @@ def get_file(workspace: str, filename: str):
                 "error": "Invalid filename"
             }), 400
         
-        workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
+        try:
+            workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
+        except ValueError as e:
+            logger.error(f"Workspace validation failed: {e}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
         file_path = workspace_dir / filename
         
         if not file_path.exists():
@@ -680,7 +702,14 @@ def delete_file(workspace: str, filename: str):
                 "error": "Invalid filename"
             }), 400
         
-        workspace_dir = _ensure_workspace_dir(workspace)
+        try:
+            workspace_dir = _ensure_workspace_dir(workspace)
+        except ValueError as e:
+            logger.error(f"Workspace validation failed: {e}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
         file_path = workspace_dir / filename
         
         if not file_path.exists():
@@ -725,6 +754,10 @@ def get_output(workspace: str):
                 "error": f"Invalid workspace name: {workspace}"
             }), 400
         
+        # Get timeout from query parameter
+        timeout_param = request.args.get("timeout", type=int)
+        timeout = _clamp_timeout(timeout_param if timeout_param is not None else DEFAULT_TIMEOUT)
+        
         workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
         
         if not workspace_dir.exists():
@@ -738,7 +771,7 @@ def get_output(workspace: str):
             cwd=str(workspace_dir),
             capture_output=True,
             text=True,
-            timeout=DEFAULT_TIMEOUT,
+            timeout=timeout,
             check=False,
         )
         
