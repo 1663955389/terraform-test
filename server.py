@@ -211,6 +211,18 @@ async def _execute_terraform_local(
 ) -> dict[str, Any]:
     """在本地执行 Terraform 命令"""
     try:
+        # Validate workspace name (defense in depth)
+        if not _validate_workspace_name(workspace):
+            return {
+                "ok": False,
+                "status": 400,
+                "data": {
+                    "output": "",
+                    "error": f"Invalid workspace name: {workspace}",
+                    "return_code": 1,
+                },
+            }
+        
         work_dir = Path(f"{TERRAFORM_DIR}/{workspace}")
         
         # Validate workspace directory exists
