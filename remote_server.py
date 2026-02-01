@@ -383,15 +383,23 @@ def terraform_execute():
                 "error": "Destroy command requires auto_approve=true or ALLOW_UNSAFE_OPS=true"
             }), 403
         
-        # 确保工作空间目录存在
+        # Get workspace directory without creating it implicitly (align with read-style endpoints)
         try:
-            workspace_dir = _ensure_workspace_dir(workspace)
+            workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
         except ValueError as e:
             logger.error(f"Workspace validation failed: {e}")
             return jsonify({
                 "success": False,
                 "error": str(e)
             }), 400
+        
+        # Return 404 if workspace does not exist
+        if not workspace_dir.exists():
+            logger.error(f"Workspace not found: {workspace}")
+            return jsonify({
+                "success": False,
+                "error": f"Workspace not found: {workspace}"
+            }), 404
         
         # 构建命令
         terraform_cmd = _build_terraform_command(command, auto_approve)
@@ -760,6 +768,7 @@ def get_output(workspace: str):
         if not _validate_workspace_name(workspace):
             return jsonify({
                 "success": False,
+                "workspace": workspace,
                 "error": f"Invalid workspace name: {workspace}"
             }), 400
         
@@ -771,6 +780,7 @@ def get_output(workspace: str):
         if not workspace_dir.exists():
             return jsonify({
                 "success": False,
+                "workspace": workspace,
                 "error": f"Workspace not found: {workspace}"
             }), 404
         
