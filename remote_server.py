@@ -719,6 +719,13 @@ def get_output(workspace: str):
     获取 Terraform outputs
     """
     try:
+        # Validate workspace name first
+        if not _validate_workspace_name(workspace):
+            return jsonify({
+                "success": False,
+                "error": f"Invalid workspace name: {workspace}"
+            }), 400
+        
         workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
         
         if not workspace_dir.exists():
@@ -751,6 +758,13 @@ def get_output(workspace: str):
             "error": result.stderr if result.returncode != 0 else None,
         }), 200
     
+    except ValueError as e:
+        # Handle validation errors
+        logger.error(f"Validation error: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
     except Exception as e:
         logger.exception(f"Failed to get output: {e}")
         return jsonify({

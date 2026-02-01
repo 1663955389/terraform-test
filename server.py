@@ -207,16 +207,13 @@ def _parse_terraform_apply(output: str) -> dict[str, Any]:
 
 # ---------- Local Execution --------
 async def _execute_terraform_local(
-    command: str,
+    cmd_parts: list[str],
     workspace: str,
     timeout: int,
 ) -> dict[str, Any]:
     """在本地执行 Terraform 命令"""
     try:
         work_dir = f"{TERRAFORM_DIR}/{workspace}"
-        
-        # Parse command string to argv list
-        cmd_parts = command.split()
         
         result = await anyio.to_thread.run_sync(
             subprocess.run,
@@ -1007,7 +1004,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         try:
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local("terraform init", workspace, timeout)
+                result = await _execute_terraform_local(["terraform", "init"], workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
@@ -1041,7 +1038,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         try:
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local("terraform validate", workspace, timeout)
+                result = await _execute_terraform_local(["terraform", "validate"], workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
@@ -1075,7 +1072,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         try:
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local("terraform plan", workspace, timeout)
+                result = await _execute_terraform_local(["terraform", "plan"], workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
@@ -1113,7 +1110,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         audit_base["timeout"] = timeout
 
         try:
-            cmd = "terraform apply" + (" -auto-approve" if auto_approve else "")
+            cmd = ["terraform", "apply"]
+            if auto_approve:
+                cmd.append("-auto-approve")
             
             if EXECUTION_MODE == "local":
                 result = await _execute_terraform_local(cmd, workspace, timeout)
@@ -1154,7 +1153,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         audit_base["timeout"] = timeout
 
         try:
-            cmd = "terraform destroy" + (" -auto-approve" if auto_approve else "")
+            cmd = ["terraform", "destroy"]
+            if auto_approve:
+                cmd.append("-auto-approve")
             
             if EXECUTION_MODE == "local":
                 result = await _execute_terraform_local(cmd, workspace, timeout)
@@ -1194,7 +1195,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             command = "list"
 
         try:
-            terraform_cmd = f"terraform state {command}"
+            terraform_cmd = ["terraform", "state", command]
             
             if EXECUTION_MODE == "local":
                 result = await _execute_terraform_local(terraform_cmd, workspace, DEFAULT_TIMEOUT)
