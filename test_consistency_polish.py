@@ -16,7 +16,8 @@ import sys
 # Set up environment variables before importing modules
 _temp_log_dir = tempfile.mkdtemp()
 _temp_terraform_dir = tempfile.mkdtemp()
-_temp_audit_log = os.path.join(tempfile.gettempdir(), 'test-consistency-audit.jsonl')
+# Use unique temp file for audit log to avoid conflicts in parallel test runs
+_temp_audit_log = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, prefix='test-consistency-audit-').name
 
 os.environ['LOG_DIR'] = _temp_log_dir
 os.environ['TERRAFORM_DIR'] = _temp_terraform_dir
@@ -118,7 +119,7 @@ class TestServerListFilesValidation:
             "workspace@bad",  # Invalid character
             "workspace with spaces",  # Spaces
             "a" * 65,  # Too long
-            # Note: Empty string gets converted to "default" at the top level (line 621 in server.py)
+            # Note: Empty string gets converted to "default" in the call_tool function
         ]
         
         try:
