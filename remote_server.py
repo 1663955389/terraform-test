@@ -8,6 +8,7 @@ import os
 import json
 import subprocess
 import shutil
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
@@ -25,6 +26,18 @@ LOG_DIR = Path(os.getenv("LOG_DIR", "/var/log/terraform-executor"))
 DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "30"))
 MAX_OUTPUT_BYTES = int(os.getenv("MAX_OUTPUT_BYTES", "500000"))
 ALLOW_UNSAFE_OPS = os.getenv("ALLOW_UNSAFE_OPS", "false").lower() in {"1", "true", "yes"}
+
+# Timeout limits
+MAX_INIT_TIMEOUT = 120
+MAX_VALIDATE_TIMEOUT = 60
+MAX_PLAN_TIMEOUT = 300
+MAX_APPLY_TIMEOUT = 600
+MAX_DESTROY_TIMEOUT = 600
+MAX_STATE_TIMEOUT = 60
+
+# Validation patterns
+WORKSPACE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+$')
+FILENAME_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+$')
 
 # 创建日志目录
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,13 +83,32 @@ def _truncate(s: str, max_bytes: int) -> str:
         return s
     return b[:max_bytes].decode("utf-8", errors="replace") + "\n...[truncated]"
 
-def _ensure_workspace_dir(workspace: str) -> Path:
-    """确保工作空间目录存在"""
-    # 验证工作空间名称（防止路径遍历攻击）
-    if ".." in workspace or "/" in workspace or "\\" in workspace:
+def _validate_workspace_name(workspace: str) -> bool:
+    """验证工作空间名称安全性"""
+    if not workspace or not isinstance(workspace, str):
+        return False
+    if len(workspace) > 255:
+        return False
+    return WORKSPACE_NAME_PATTERN.match(workspace) is not None
+
+def _validate_filename(filename: str) -> bool:
+    """验证文件名安全性"""
+    if not filename or not isinstance(filename, str):
+        return False
+    if len(filename) > 255:
+        return False
+    return FILENAME_PATTERN.match(filename) is not None
+
+def _get_workspace_dir(workspace: str) -> Path:
+    """获取工作空间目录路径（不创建）"""
+    if not _validate_workspace_name(workspace):
         raise ValueError(f"Invalid workspace name: {workspace}")
     
-    workspace_dir = Path(TERRAFORM_DIR) / workspace
+    return Path(TERRAFORM_DIR) / workspace
+
+def _ensure_workspace_dir(workspace: str) -> Path:
+    """确保工作空间目录存在"""
+    workspace_dir = _get_workspace_dir(workspace)
     workspace_dir.mkdir(parents=True, exist_ok=True)
     
     return workspace_dir
@@ -275,7 +307,7 @@ def upload_terraform():
         file_path = workspace_dir / filename
         
         # 计算内容哈希
-        content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         
         # 写入文件
         file_path.write_text(content, encoding="utf-8")
@@ -336,6 +368,20 @@ def terraform_execute():
         auto_approve = data.get("auto_approve", False)
         timeout = int(data.get("timeout", DEFAULT_TIMEOUT))
         
+        # Clamp timeout to maximum based on command type
+        if command == "init":
+            timeout = min(timeout, MAX_INIT_TIMEOUT)
+        elif command == "validate":
+            timeout = min(timeout, MAX_VALIDATE_TIMEOUT)
+        elif command == "plan":
+            timeout = min(timeout, MAX_PLAN_TIMEOUT)
+        elif command == "apply":
+            timeout = min(timeout, MAX_APPLY_TIMEOUT)
+        elif command == "destroy":
+            timeout = min(timeout, MAX_DESTROY_TIMEOUT)
+        elif command in ("state_list", "state_show"):
+            timeout = min(timeout, MAX_STATE_TIMEOUT)
+        
         # 验证输入
         valid_commands = {
             "init", "validate", "plan", "apply", "destroy",
@@ -366,7 +412,6 @@ def terraform_execute():
         # 执行命令
         result = subprocess.run(
             terraform_cmd,
-            shell=True,
             cwd=str(workspace_dir),
             capture_output=True,
             text=True,
@@ -455,10 +500,10 @@ def create_workspace():
             }), 400
         
         # 验证工作空间名称
-        if not _validate_filename(workspace):
+        if not _validate_workspace_name(workspace):
             return jsonify({
                 "success": False,
-                "error": "Invalid workspace name"
+                "error": "Invalid workspace name (must match ^[a-zA-Z0-9._-]+$)"
             }), 400
         
         workspace_dir = _ensure_workspace_dir(workspace)
@@ -530,13 +575,13 @@ def delete_workspace(workspace: str):
     """
     try:
         # 验证工作空间名称
-        if not _validate_filename(workspace):
+        if not _validate_workspace_name(workspace):
             return jsonify({
                 "success": False,
                 "error": "Invalid workspace name"
             }), 400
         
-        workspace_dir = Path(TERRAFORM_DIR) / workspace
+        workspace_dir = _get_workspace_dir(workspace)
         
         if not workspace_dir.exists():
             return jsonify({
@@ -575,7 +620,21 @@ def list_files(workspace: str):
     列出工作空间中的所有 Terraform 文件
     """
     try:
-        workspace_dir = _ensure_workspace_dir(workspace)
+        # 验证工作空间名称
+        if not _validate_workspace_name(workspace):
+            return jsonify({
+                "success": False,
+                "error": "Invalid workspace name"
+            }), 400
+        
+        workspace_dir = _get_workspace_dir(workspace)
+        
+        # 如果工作空间不存在，返回 404
+        if not workspace_dir.exists():
+            return jsonify({
+                "success": False,
+                "error": f"Workspace '{workspace}' does not exist"
+            }), 404
         
         files = []
         for f in workspace_dir.glob("*.tf"):
@@ -608,6 +667,13 @@ def get_file(workspace: str, filename: str):
     获取工作空间中的 Terraform 文件内容
     """
     try:
+        # 验证工作空间名称
+        if not _validate_workspace_name(workspace):
+            return jsonify({
+                "success": False,
+                "error": "Invalid workspace name"
+            }), 400
+        
         # 验证文件名
         if not _validate_filename(filename):
             return jsonify({
@@ -615,7 +681,15 @@ def get_file(workspace: str, filename: str):
                 "error": "Invalid filename"
             }), 400
         
-        workspace_dir = _ensure_workspace_dir(workspace)
+        workspace_dir = _get_workspace_dir(workspace)
+        
+        # 如果工作空间不存在，返回 404
+        if not workspace_dir.exists():
+            return jsonify({
+                "success": False,
+                "error": f"Workspace '{workspace}' does not exist"
+            }), 404
+        
         file_path = workspace_dir / filename
         
         if not file_path.exists():
@@ -655,6 +729,13 @@ def delete_file(workspace: str, filename: str):
     删除工作空间中的 Terraform 文件
     """
     try:
+        # 验证工作空间名称
+        if not _validate_workspace_name(workspace):
+            return jsonify({
+                "success": False,
+                "error": "Invalid workspace name"
+            }), 400
+        
         # 验证文件名
         if not _validate_filename(filename):
             return jsonify({
@@ -662,7 +743,15 @@ def delete_file(workspace: str, filename: str):
                 "error": "Invalid filename"
             }), 400
         
-        workspace_dir = _ensure_workspace_dir(workspace)
+        workspace_dir = _get_workspace_dir(workspace)
+        
+        # 如果工作空间不存在，返回 404
+        if not workspace_dir.exists():
+            return jsonify({
+                "success": False,
+                "error": f"Workspace '{workspace}' does not exist"
+            }), 404
+        
         file_path = workspace_dir / filename
         
         if not file_path.exists():
@@ -700,11 +789,24 @@ def get_output(workspace: str):
     获取 Terraform outputs
     """
     try:
-        workspace_dir = _ensure_workspace_dir(workspace)
+        # 验证工作空间名称
+        if not _validate_workspace_name(workspace):
+            return jsonify({
+                "success": False,
+                "error": "Invalid workspace name"
+            }), 400
+        
+        workspace_dir = _get_workspace_dir(workspace)
+        
+        # 如果工作空间不存在，返回 404
+        if not workspace_dir.exists():
+            return jsonify({
+                "success": False,
+                "error": f"Workspace '{workspace}' does not exist"
+            }), 404
         
         result = subprocess.run(
-            f"{TERRAFORM_BIN} output -json",
-            shell=True,
+            [TERRAFORM_BIN, "output", "-json"],
             cwd=str(workspace_dir),
             capture_output=True,
             text=True,
@@ -790,32 +892,32 @@ def get_operation_logs():
 
 # ---------- Helper Functions --------
 
-def _build_terraform_command(command: str, auto_approve: bool = False) -> str:
+def _build_terraform_command(command: str, auto_approve: bool = False) -> list[str]:
     """
-    构建 Terraform 命令
+    构建 Terraform 命令 (返回列表形式以避免 shell 注入)
     """
     if command == "init":
-        return f"{TERRAFORM_BIN} init"
+        return [TERRAFORM_BIN, "init"]
     elif command == "validate":
-        return f"{TERRAFORM_BIN} validate"
+        return [TERRAFORM_BIN, "validate"]
     elif command == "plan":
-        return f"{TERRAFORM_BIN} plan"
+        return [TERRAFORM_BIN, "plan"]
     elif command == "apply":
         if auto_approve:
-            return f"{TERRAFORM_BIN} apply -auto-approve"
+            return [TERRAFORM_BIN, "apply", "-auto-approve"]
         else:
-            return f"{TERRAFORM_BIN} apply -auto-approve"
+            return [TERRAFORM_BIN, "apply"]
     elif command == "destroy":
         if auto_approve:
-            return f"{TERRAFORM_BIN} destroy -auto-approve"
+            return [TERRAFORM_BIN, "destroy", "-auto-approve"]
         else:
-            return f"{TERRAFORM_BIN} destroy -auto-approve"
+            return [TERRAFORM_BIN, "destroy"]
     elif command == "state_list":
-        return f"{TERRAFORM_BIN} state list"
+        return [TERRAFORM_BIN, "state", "list"]
     elif command == "state_show":
-        return f"{TERRAFORM_BIN} state show"
+        return [TERRAFORM_BIN, "state", "show"]
     elif command == "output":
-        return f"{TERRAFORM_BIN} output -json"
+        return [TERRAFORM_BIN, "output", "-json"]
     else:
         raise ValueError(f"Unknown command: {command}")
 

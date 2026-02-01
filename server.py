@@ -51,6 +51,18 @@ AUDIT_LOG = Path(_env("MCP_AUDIT_LOG", "/tmp/mcp-terraform-audit.jsonl"))
 DEFAULT_TIMEOUT = int(_env("MCP_DEFAULT_TIMEOUT", "30"))
 MAX_OUTPUT_BYTES = int(_env("MCP_MAX_OUTPUT_BYTES", "500000"))
 
+# Timeout limits (matching remote_server.py)
+MAX_INIT_TIMEOUT = 120
+MAX_VALIDATE_TIMEOUT = 60
+MAX_PLAN_TIMEOUT = 300
+MAX_APPLY_TIMEOUT = 600
+MAX_DESTROY_TIMEOUT = 600
+MAX_STATE_TIMEOUT = 60
+
+# Validation patterns
+WORKSPACE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+$')
+FILENAME_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+$')
+
 if EXECUTION_MODE not in ("local", "http"):
     raise ValueError(f"Invalid EXECUTION_MODE: {EXECUTION_MODE}")
 
@@ -73,7 +85,53 @@ def audit_log(entry: dict[str, Any]) -> None:
     except Exception:
         logger.exception("Failed to write audit log")
 
+# ---------- Validation Utilities --------
+def _validate_workspace_name(workspace: str) -> bool:
+    """验证工作空间名称安全性"""
+    if not workspace or not isinstance(workspace, str):
+        return False
+    if len(workspace) > 255:
+        return False
+    return WORKSPACE_NAME_PATTERN.match(workspace) is not None
+
+def _validate_filename(filename: str) -> bool:
+    """验证文件名安全性"""
+    if not filename or not isinstance(filename, str):
+        return False
+    if len(filename) > 255:
+        return False
+    return FILENAME_PATTERN.match(filename) is not None
+
 # ---------- Terraform Utilities --------
+def _build_terraform_command_list(command: str, auto_approve: bool = False) -> list[str]:
+    """构建 Terraform 命令列表（避免 shell 注入）"""
+    terraform_bin = "terraform"
+    
+    if command == "init":
+        return [terraform_bin, "init"]
+    elif command == "validate":
+        return [terraform_bin, "validate"]
+    elif command == "plan":
+        return [terraform_bin, "plan"]
+    elif command == "apply":
+        if auto_approve:
+            return [terraform_bin, "apply", "-auto-approve"]
+        else:
+            return [terraform_bin, "apply"]
+    elif command == "destroy":
+        if auto_approve:
+            return [terraform_bin, "destroy", "-auto-approve"]
+        else:
+            return [terraform_bin, "destroy"]
+    elif command == "state_list":
+        return [terraform_bin, "state", "list"]
+    elif command == "state_show":
+        return [terraform_bin, "state", "show"]
+    elif command == "output":
+        return [terraform_bin, "output", "-json"]
+    else:
+        raise ValueError(f"Unknown command: {command}")
+
 def _validate_hcl_syntax(code: str) -> tuple[bool, list[str]]:
     """基础的 HCL 语法检查"""
     errors = []
@@ -181,7 +239,7 @@ def _parse_terraform_apply(output: str) -> dict[str, Any]:
 
 # ---------- Local Execution --------
 async def _execute_terraform_local(
-    command: str,
+    command: list[str],
     workspace: str,
     timeout: int,
 ) -> dict[str, Any]:
@@ -192,7 +250,6 @@ async def _execute_terraform_local(
         result = await anyio.to_thread.run_sync(
             subprocess.run,
             command,
-            shell=True,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -236,7 +293,7 @@ def _upload_terraform_local(filename: str, content: str, workspace: str) -> dict
         work_dir = Path(TERRAFORM_DIR) / workspace
         work_dir.mkdir(parents=True, exist_ok=True)
         
-        code_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+        code_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         
         if not filename.endswith('.tf'):
             filename = f"{filename}.tf"
@@ -552,6 +609,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     req_id = uuid.uuid4().hex
     workspace = str(arguments.get("workspace", "default")).strip() or "default"
     
+    # Validate workspace name
+    if not _validate_workspace_name(workspace):
+        error_msg = f"Invalid workspace name: {workspace} (must match ^[a-zA-Z0-9._-]+$)"
+        resp = {"success": False, "error": error_msg}
+        return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+    
     audit_base = {
         "ts": _now_iso(),
         "req_id": req_id,
@@ -569,12 +632,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate filename
+        if not _validate_filename(filename):
+            error_msg = f"Invalid filename: {filename} (must match ^[a-zA-Z0-9._-]+$)"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
                 result = _upload_terraform_local(filename, code, workspace)
             else:
-                code_hash = hashlib.md5(code.encode()).hexdigest()[:8]
+                code_hash = hashlib.sha256(code.encode()).hexdigest()[:16]
                 result = await _remote_request(
                     path="/upload_terraform",
                     method="POST",
@@ -697,6 +767,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate filename
+        if not _validate_filename(filename):
+            error_msg = f"Invalid filename: {filename}"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
@@ -753,6 +830,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if not filename:
             error_msg = "Missing 'filename'"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate filename
+        if not _validate_filename(filename):
+            error_msg = f"Invalid filename: {filename}"
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
@@ -850,6 +934,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate workspace name
+        if not _validate_workspace_name(new_workspace):
+            error_msg = f"Invalid workspace name: {new_workspace}"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
@@ -891,6 +982,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate workspace name
+        if not _validate_workspace_name(delete_workspace):
+            error_msg = f"Invalid workspace name: {delete_workspace}"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
@@ -926,12 +1024,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "terraform_init":
         timeout = int(arguments.get("timeout", DEFAULT_TIMEOUT))
+        timeout = min(timeout, MAX_INIT_TIMEOUT)  # Clamp to maximum
         audit_base["operation"] = "init"
         audit_base["timeout"] = timeout
 
         try:
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local("terraform init", workspace, timeout)
+                result = await _execute_terraform_local(_build_terraform_command_list("init"), workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
@@ -960,12 +1059,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "terraform_validate":
         timeout = int(arguments.get("timeout", DEFAULT_TIMEOUT))
+        timeout = min(timeout, MAX_VALIDATE_TIMEOUT)  # Clamp to maximum
         audit_base["operation"] = "validate"
         audit_base["timeout"] = timeout
 
         try:
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local("terraform validate", workspace, timeout)
+                result = await _execute_terraform_local(_build_terraform_command_list("validate"), workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
@@ -994,12 +1094,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "terraform_plan":
         timeout = int(arguments.get("timeout", 60))
+        timeout = min(timeout, MAX_PLAN_TIMEOUT)  # Clamp to maximum
         audit_base["operation"] = "plan"
         audit_base["timeout"] = timeout
 
         try:
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local("terraform plan", workspace, timeout)
+                result = await _execute_terraform_local(_build_terraform_command_list("plan"), workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
@@ -1032,12 +1133,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "terraform_apply":
         auto_approve = arguments.get("auto_approve", False)
         timeout = int(arguments.get("timeout", 120))
+        timeout = min(timeout, MAX_APPLY_TIMEOUT)  # Clamp to maximum
         audit_base["operation"] = "apply"
         audit_base["auto_approve"] = auto_approve
         audit_base["timeout"] = timeout
 
         try:
-            cmd = "terraform apply" + (" -auto-approve" if auto_approve else "")
+            cmd = _build_terraform_command_list("apply", auto_approve)
             
             if EXECUTION_MODE == "local":
                 result = await _execute_terraform_local(cmd, workspace, timeout)
@@ -1073,12 +1175,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "terraform_destroy":
         auto_approve = arguments.get("auto_approve", False)
         timeout = int(arguments.get("timeout", 120))
+        timeout = min(timeout, MAX_DESTROY_TIMEOUT)  # Clamp to maximum
         audit_base["operation"] = "destroy"
         audit_base["auto_approve"] = auto_approve
         audit_base["timeout"] = timeout
 
         try:
-            cmd = "terraform destroy" + (" -auto-approve" if auto_approve else "")
+            cmd = _build_terraform_command_list("destroy", auto_approve)
             
             if EXECUTION_MODE == "local":
                 result = await _execute_terraform_local(cmd, workspace, timeout)
@@ -1118,15 +1221,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             command = "list"
 
         try:
-            terraform_cmd = f"terraform state {command}"
+            terraform_cmd = _build_terraform_command_list(f"state_{command}")
+            timeout = min(DEFAULT_TIMEOUT, MAX_STATE_TIMEOUT)  # Clamp to maximum
             
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local(terraform_cmd, workspace, DEFAULT_TIMEOUT)
+                result = await _execute_terraform_local(terraform_cmd, workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
                     method="POST",
-                    body={"command": f"state_{command}", "workspace": workspace, "timeout": DEFAULT_TIMEOUT},
+                    body={"command": f"state_{command}", "workspace": workspace, "timeout": timeout},
                 )
 
             data = result.get("data", {})
