@@ -804,7 +804,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         try:
             if EXECUTION_MODE == "local":
-                file_path = Path(TERRAFORM_DIR) / workspace / filename
+                work_dir = Path(TERRAFORM_DIR) / workspace
+                if not work_dir.exists():
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "workspace": workspace,
+                        "error": f"Workspace not found: {workspace}"
+                    }, ensure_ascii=False, indent=2))]
+                
+                file_path = work_dir / filename
                 if not file_path.exists():
                     return [TextContent(type="text", text=json.dumps({
                         "success": False,
@@ -870,7 +878,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         try:
             if EXECUTION_MODE == "local":
-                file_path = Path(TERRAFORM_DIR) / workspace / filename
+                work_dir = Path(TERRAFORM_DIR) / workspace
+                if not work_dir.exists():
+                    return [TextContent(type="text", text=json.dumps({
+                        "success": False,
+                        "workspace": workspace,
+                        "error": f"Workspace not found: {workspace}"
+                    }, ensure_ascii=False, indent=2))]
+                
+                file_path = work_dir / filename
                 if not file_path.exists():
                     return [TextContent(type="text", text=json.dumps({
                         "success": False,
