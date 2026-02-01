@@ -67,7 +67,6 @@ def _truncate(s: str, max_bytes: int) -> str:
 
 def _validate_workspace_name(workspace: str) -> bool:
     """验证工作空间名称（严格的允许列表正则）"""
-    import re
     # 只允许字母、数字、下划线和连字符，长度 1-64
     if not workspace or len(workspace) > 64:
         return False
@@ -75,7 +74,6 @@ def _validate_workspace_name(workspace: str) -> bool:
 
 def _validate_filename(filename: str) -> bool:
     """验证文件名安全性（严格的允许列表正则）"""
-    import re
     # 只允许字母、数字、下划线、连字符和点，长度 1-128
     if not filename or len(filename) > 128:
         return False
