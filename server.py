@@ -211,7 +211,19 @@ async def _execute_terraform_local(
 ) -> dict[str, Any]:
     """在本地执行 Terraform 命令"""
     try:
-        work_dir = f"{TERRAFORM_DIR}/{workspace}"
+        work_dir = Path(f"{TERRAFORM_DIR}/{workspace}")
+        
+        # Validate workspace directory exists
+        if not work_dir.exists():
+            return {
+                "ok": False,
+                "status": 404,
+                "data": {
+                    "output": "",
+                    "error": f"Workspace directory does not exist: {workspace}",
+                    "return_code": 1,
+                },
+            }
         
         result = await anyio.to_thread.run_sync(
             subprocess.run,
@@ -219,7 +231,7 @@ async def _execute_terraform_local(
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=work_dir,
+            cwd=str(work_dir),
             check=False,
         )
         
@@ -936,6 +948,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate workspace name
+        if not _validate_workspace_name(new_workspace):
+            error_msg = f"Invalid workspace name: {new_workspace}"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
@@ -974,6 +993,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if not delete_workspace:
             error_msg = "Missing 'workspace'"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate workspace name
+        if not _validate_workspace_name(delete_workspace):
+            error_msg = f"Invalid workspace name: {delete_workspace}"
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
@@ -1201,8 +1227,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "terraform_state":
         command = str(arguments.get("command", "list")).lower()
+        timeout = _clamp_timeout(arguments.get("timeout"), DEFAULT_TIMEOUT)
         audit_base["operation"] = "state"
         audit_base["command"] = command
+        audit_base["timeout"] = timeout
 
         if command not in ("list", "show"):
             command = "list"
@@ -1211,12 +1239,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             terraform_cmd = ["terraform", "state", command]
             
             if EXECUTION_MODE == "local":
-                result = await _execute_terraform_local(terraform_cmd, workspace, DEFAULT_TIMEOUT)
+                result = await _execute_terraform_local(terraform_cmd, workspace, timeout)
             else:
                 result = await _remote_request(
                     path="/terraform",
                     method="POST",
-                    body={"command": f"state_{command}", "workspace": workspace, "timeout": DEFAULT_TIMEOUT},
+                    body={"command": f"state_{command}", "workspace": workspace, "timeout": timeout},
                 )
 
             data = result.get("data", {})
