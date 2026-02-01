@@ -727,6 +727,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         try:
             if EXECUTION_MODE == "local":
+                # Validate workspace name before accessing filesystem
+                if not _validate_workspace_name(workspace):
+                    error_msg = f"Invalid workspace name: {workspace}"
+                    audit_log({**audit_base, "blocked": True, "reason": error_msg})
+                    resp = {"success": False, "error": error_msg}
+                    return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+                
                 work_dir = Path(TERRAFORM_DIR) / workspace
                 if not work_dir.exists():
                     files = []
