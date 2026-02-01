@@ -34,3 +34,9 @@ Thumbs.db
 *.tfstate
 *.tfstate.backup
 .terraform.lock.hcl
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+build/

@@ -16,7 +16,8 @@ from pathlib import Path
 # Set up temporary directories
 temp_log_dir = tempfile.mkdtemp(prefix='verify-log-')
 temp_terraform_dir = tempfile.mkdtemp(prefix='verify-terraform-')
-temp_audit_log = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, prefix='verify-audit-').name
+temp_audit_log_fd, temp_audit_log = tempfile.mkstemp(suffix='.jsonl', prefix='verify-audit-')
+os.close(temp_audit_log_fd)  # Close the file descriptor, we only need the path
 
 os.environ['LOG_DIR'] = temp_log_dir
 os.environ['TERRAFORM_DIR'] = temp_terraform_dir

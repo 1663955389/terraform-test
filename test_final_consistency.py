@@ -18,7 +18,8 @@ import subprocess
 # Set up environment variables before importing modules
 _temp_log_dir = tempfile.mkdtemp()
 _temp_terraform_dir = tempfile.mkdtemp()
-_temp_audit_log = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, prefix='test-final-consistency-').name
+_temp_audit_log_fd, _temp_audit_log = tempfile.mkstemp(suffix='.jsonl', prefix='test-final-consistency-')
+os.close(_temp_audit_log_fd)  # Close the file descriptor, we only need the path
 
 os.environ['LOG_DIR'] = _temp_log_dir
 os.environ['TERRAFORM_DIR'] = _temp_terraform_dir
