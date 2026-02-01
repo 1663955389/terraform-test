@@ -49,6 +49,7 @@ MCP_HOST = _env("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(_env("MCP_PORT", "8000"))
 AUDIT_LOG = Path(_env("MCP_AUDIT_LOG", "/tmp/mcp-terraform-audit.jsonl"))
 DEFAULT_TIMEOUT = int(_env("MCP_DEFAULT_TIMEOUT", "30"))
+MAX_TIMEOUT = int(_env("MCP_MAX_TIMEOUT", "300"))
 MAX_OUTPUT_BYTES = int(_env("MCP_MAX_OUTPUT_BYTES", "500000"))
 
 if EXECUTION_MODE not in ("local", "http"):
@@ -63,6 +64,31 @@ def _truncate(s: str, max_bytes: int) -> str:
     if len(b) <= max_bytes:
         return s
     return b[:max_bytes].decode("utf-8", errors="replace") + "\n...[truncated]"
+
+def _validate_workspace_name(workspace: str) -> bool:
+    """验证工作空间名称（严格的允许列表正则）"""
+    import re
+    # 只允许字母、数字、下划线和连字符，长度 1-64
+    if not workspace or len(workspace) > 64:
+        return False
+    return bool(re.match(r'^[a-zA-Z0-9_-]+$', workspace))
+
+def _validate_filename(filename: str) -> bool:
+    """验证文件名安全性（严格的允许列表正则）"""
+    import re
+    # 只允许字母、数字、下划线、连字符和点，长度 1-128
+    if not filename or len(filename) > 128:
+        return False
+    # 不允许以点开头或包含路径遍历
+    if filename.startswith('.') or '..' in filename:
+        return False
+    return bool(re.match(r'^[a-zA-Z0-9_.-]+$', filename))
+
+def _clamp_timeout(timeout: int | None, default: int = DEFAULT_TIMEOUT) -> int:
+    """Clamp timeout to configured maximum"""
+    if timeout is None:
+        return default
+    return min(max(1, int(timeout)), MAX_TIMEOUT)
 
 def audit_log(entry: dict[str, Any]) -> None:
     """Append a JSONL audit record"""
@@ -189,10 +215,12 @@ async def _execute_terraform_local(
     try:
         work_dir = f"{TERRAFORM_DIR}/{workspace}"
         
+        # Parse command string to argv list
+        cmd_parts = command.split()
+        
         result = await anyio.to_thread.run_sync(
             subprocess.run,
-            command,
-            shell=True,
+            cmd_parts,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -233,10 +261,31 @@ async def _execute_terraform_local(
 def _upload_terraform_local(filename: str, content: str, workspace: str) -> dict[str, Any]:
     """在本地保存 Terraform 配置文件"""
     try:
+        # Validate workspace and filename
+        if not _validate_workspace_name(workspace):
+            return {
+                "ok": False,
+                "status": 400,
+                "data": {
+                    "success": False,
+                    "error": "Invalid workspace name",
+                },
+            }
+        
+        if not _validate_filename(filename):
+            return {
+                "ok": False,
+                "status": 400,
+                "data": {
+                    "success": False,
+                    "error": "Invalid filename",
+                },
+            }
+        
         work_dir = Path(TERRAFORM_DIR) / workspace
         work_dir.mkdir(parents=True, exist_ok=True)
         
-        code_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+        code_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         
         if not filename.endswith('.tf'):
             filename = f"{filename}.tf"
@@ -446,7 +495,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "执行超时时间（秒），默认 30，最大 120"
+                        "description": "执行超时时间（秒），默认 30，最大 300"
                     },
                 },
             },
@@ -463,7 +512,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "执行超时时间（秒），默认 30"
+                        "description": "执行超时时间（秒），默认 30，最大 300"
                     },
                 },
             },
@@ -480,7 +529,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "执行超时时间（秒），默认 60"
+                        "description": "执行超时时间（秒），默认 60，最大 300"
                     },
                 },
             },
@@ -501,7 +550,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "执行超时时间（秒），默认 120"
+                        "description": "执行超时时间（秒），默认 120，最大 300"
                     },
                 },
             },
@@ -522,7 +571,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "执行超时时间（秒），默认 120"
+                        "description": "执行超时时间（秒），默认 120，最大 300"
                     },
                 },
             },
@@ -552,6 +601,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     req_id = uuid.uuid4().hex
     workspace = str(arguments.get("workspace", "default")).strip() or "default"
     
+    # Validate workspace name
+    if not _validate_workspace_name(workspace):
+        error_msg = f"Invalid workspace name: {workspace}"
+        resp = {"success": False, "error": error_msg}
+        return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+    
     audit_base = {
         "ts": _now_iso(),
         "req_id": req_id,
@@ -569,12 +624,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate filename
+        if not _validate_filename(filename):
+            error_msg = f"Invalid filename: {filename}"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
                 result = _upload_terraform_local(filename, code, workspace)
             else:
-                code_hash = hashlib.md5(code.encode()).hexdigest()[:8]
+                code_hash = hashlib.sha256(code.encode()).hexdigest()[:16]
                 result = await _remote_request(
                     path="/upload_terraform",
                     method="POST",
@@ -697,6 +759,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate filename
+        if not _validate_filename(filename):
+            error_msg = f"Invalid filename: {filename}"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
         try:
             if EXECUTION_MODE == "local":
@@ -753,6 +822,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if not filename:
             error_msg = "Missing 'filename'"
+            audit_log({**audit_base, "blocked": True, "reason": error_msg})
+            resp = {"success": False, "error": error_msg}
+            return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
+        
+        # Validate filename
+        if not _validate_filename(filename):
+            error_msg = f"Invalid filename: {filename}"
             audit_log({**audit_base, "blocked": True, "reason": error_msg})
             resp = {"success": False, "error": error_msg}
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
@@ -925,7 +1001,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
     elif name == "terraform_init":
-        timeout = int(arguments.get("timeout", DEFAULT_TIMEOUT))
+        timeout = _clamp_timeout(arguments.get("timeout"), DEFAULT_TIMEOUT)
         audit_base["operation"] = "init"
         audit_base["timeout"] = timeout
 
@@ -959,7 +1035,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
     elif name == "terraform_validate":
-        timeout = int(arguments.get("timeout", DEFAULT_TIMEOUT))
+        timeout = _clamp_timeout(arguments.get("timeout"), DEFAULT_TIMEOUT)
         audit_base["operation"] = "validate"
         audit_base["timeout"] = timeout
 
@@ -993,7 +1069,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
 
     elif name == "terraform_plan":
-        timeout = int(arguments.get("timeout", 60))
+        timeout = _clamp_timeout(arguments.get("timeout"), 60)
         audit_base["operation"] = "plan"
         audit_base["timeout"] = timeout
 
@@ -1031,7 +1107,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "terraform_apply":
         auto_approve = arguments.get("auto_approve", False)
-        timeout = int(arguments.get("timeout", 120))
+        timeout = _clamp_timeout(arguments.get("timeout"), 120)
         audit_base["operation"] = "apply"
         audit_base["auto_approve"] = auto_approve
         audit_base["timeout"] = timeout
@@ -1072,7 +1148,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "terraform_destroy":
         auto_approve = arguments.get("auto_approve", False)
-        timeout = int(arguments.get("timeout", 120))
+        timeout = _clamp_timeout(arguments.get("timeout"), 120)
         audit_base["operation"] = "destroy"
         audit_base["auto_approve"] = auto_approve
         audit_base["timeout"] = timeout
