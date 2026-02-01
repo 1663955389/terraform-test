@@ -599,6 +599,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     # Validate workspace name
     if not _validate_workspace_name(workspace):
         error_msg = f"Invalid workspace name: {workspace}"
+        audit_log({
+            "ts": _now_iso(),
+            "req_id": req_id,
+            "tool": name,
+            "mode": EXECUTION_MODE,
+            "workspace": workspace,
+            "blocked": True,
+            "reason": error_msg
+        })
         resp = {"success": False, "error": error_msg}
         return [TextContent(type="text", text=json.dumps(resp, ensure_ascii=False, indent=2))]
     
@@ -872,10 +881,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if not terraform_root.exists():
                     workspaces = []
                 else:
-                    workspaces = sorted([
-                        d.name for d in terraform_root.iterdir()
-                        if d.is_dir() and not d.name.startswith(".")
-                    ])
+                    workspaces = []
+                    for d in terraform_root.iterdir():
+                        if d.is_dir() and not d.name.startswith("."):
+                            tf_files = list(d.glob("*.tf"))
+                            workspaces.append({
+                                "name": d.name,
+                                "file_count": len(tf_files),
+                                "created_at": datetime.fromtimestamp(d.stat().st_ctime).isoformat(),
+                            })
+                    workspaces = sorted(workspaces, key=lambda x: x["name"])
                 
                 result = {
                     "ok": True,
