@@ -89,6 +89,9 @@ def _validate_workspace_name(workspace: str) -> bool:
         return False
     if len(workspace) > 255:
         return False
+    # Block dangerous patterns
+    if workspace in (".", ".."):
+        return False
     return WORKSPACE_NAME_PATTERN.match(workspace) is not None
 
 def _validate_filename(filename: str) -> bool:
@@ -96,6 +99,9 @@ def _validate_filename(filename: str) -> bool:
     if not filename or not isinstance(filename, str):
         return False
     if len(filename) > 255:
+        return False
+    # Block dangerous patterns
+    if filename in (".", ".."):
         return False
     return FILENAME_PATTERN.match(filename) is not None
 
