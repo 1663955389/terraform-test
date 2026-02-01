@@ -398,6 +398,7 @@ def terraform_execute():
             logger.error(f"Workspace not found: {workspace}")
             return jsonify({
                 "success": False,
+                "workspace": workspace,
                 "error": f"Workspace not found: {workspace}"
             }), 404
         
@@ -458,6 +459,7 @@ def terraform_execute():
         })
         return jsonify({
             "success": False,
+            "workspace": workspace,
             "error": f"Command execution timeout (>{timeout}s)",
             "return_code": 124,
         }), 408
@@ -471,6 +473,7 @@ def terraform_execute():
         })
         return jsonify({
             "success": False,
+            "workspace": workspace,
             "error": str(e)
         }), 500
 
@@ -813,12 +816,14 @@ def get_output(workspace: str):
         logger.error(f"Validation error: {e}")
         return jsonify({
             "success": False,
+            "workspace": workspace,
             "error": str(e)
         }), 400
     except Exception as e:
         logger.exception(f"Failed to get output: {e}")
         return jsonify({
             "success": False,
+            "workspace": workspace,
             "error": str(e)
         }), 500
 
