@@ -755,8 +755,7 @@ def get_output(workspace: str):
             }), 400
         
         # Get timeout from query parameter
-        timeout_param = request.args.get("timeout", type=int)
-        timeout = _clamp_timeout(timeout_param if timeout_param is not None else DEFAULT_TIMEOUT)
+        timeout = _clamp_timeout(request.args.get("timeout", type=int, default=DEFAULT_TIMEOUT))
         
         workspace_dir = _ensure_workspace_dir(workspace, create_if_missing=False)
         

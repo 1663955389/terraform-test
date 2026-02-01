@@ -14,14 +14,37 @@ from unittest.mock import patch, MagicMock
 import sys
 
 # Set up environment variables before importing modules
-os.environ['LOG_DIR'] = tempfile.mkdtemp()
-os.environ['TERRAFORM_DIR'] = tempfile.mkdtemp()
-os.environ['MCP_AUDIT_LOG'] = os.path.join(tempfile.gettempdir(), 'test-audit.jsonl')
+_temp_log_dir = tempfile.mkdtemp()
+_temp_terraform_dir = tempfile.mkdtemp()
+_temp_audit_log = os.path.join(tempfile.gettempdir(), 'test-audit.jsonl')
+
+os.environ['LOG_DIR'] = _temp_log_dir
+os.environ['TERRAFORM_DIR'] = _temp_terraform_dir
+os.environ['MCP_AUDIT_LOG'] = _temp_audit_log
 
 # Import the modules to test
 sys.path.insert(0, str(Path(__file__).parent))
 import remote_server
 import server
+
+
+def cleanup_test_environment():
+    """Clean up test environment files and directories"""
+    import shutil
+    
+    # Clean up temp directories
+    for dir_path in [_temp_log_dir, _temp_terraform_dir]:
+        if os.path.exists(dir_path):
+            shutil.rmtree(dir_path, ignore_errors=True)
+    
+    # Clean up audit log file
+    if os.path.exists(_temp_audit_log):
+        os.unlink(_temp_audit_log)
+
+
+# Register cleanup to run at exit
+import atexit
+atexit.register(cleanup_test_environment)
 
 
 class TestRemoteServerTimeoutClamping:
@@ -83,7 +106,8 @@ class TestRemoteServerValueError:
     
     def test_list_files_invalid_workspace(self):
         """Test that list_files returns 400 for invalid workspace names"""
-        invalid_workspace = "workspace@bad"  # Use invalid character instead of path traversal
+        # Using @ character which is not allowed in workspace names
+        invalid_workspace = "workspace@bad"
         response = self.client.get(f'/terraform/files/{invalid_workspace}')
         assert response.status_code == 400
         data = json.loads(response.data)
